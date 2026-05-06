@@ -1,6 +1,7 @@
 """
 agents/intel_agent.py
-Competitive Intelligence Agent — compatible with langchain 0.2+ / 0.3+
+Competitive Intelligence Agent
+Tested with: langchain==0.2.16, langchain-core==0.2.40, langchain-community==0.2.16
 """
 
 from __future__ import annotations
@@ -10,40 +11,23 @@ import time
 from datetime import datetime
 from typing import Callable
 
-# ── LangChain core (always available) ────────────────────────────────────────
+# ── Imports — pinned to langchain 0.2.x ──────────────────────────────────────
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
-
-# ── AgentExecutor: try multiple import paths for version compatibility ────────
-try:
-    from langchain.agents import AgentExecutor, create_react_agent
-except ImportError:
-    try:
-        from langchain_core.agents import AgentExecutor        # type: ignore
-        from langchain.agents import create_react_agent        # type: ignore
-    except ImportError:
-        from langchain_core.agents import (                    # type: ignore
-            AgentExecutor, create_react_agent,
-        )
-
-# ── Tool: try langchain first, fall back to langchain_core ───────────────────
-try:
-    from langchain.tools import Tool
-except ImportError:
-    from langchain_core.tools import Tool                      # type: ignore
-
-# ── Optional community packages ───────────────────────────────────────────────
-try:
-    from langchain_community.utilities import SerpAPIWrapper
-    _HAS_SERP = True
-except ImportError:
-    _HAS_SERP = False
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain.tools import Tool
 
 try:
     from langchain_community.tools.tavily_search import TavilySearchResults
     _HAS_TAVILY = True
 except ImportError:
     _HAS_TAVILY = False
+
+try:
+    from langchain_community.utilities import SerpAPIWrapper
+    _HAS_SERP = True
+except ImportError:
+    _HAS_SERP = False
 
 
 # ── ReAct Prompt ─────────────────────────────────────────────────────────────
@@ -124,12 +108,12 @@ class IntelAgent:
     def __init__(
         self,
         groq_key: str,
-        tavily_key: str | None = None,
-        serpapi_key: str | None = None,
-        model: str = "llama3-70b-8192",
+        tavily_key=None,
+        serpapi_key=None,
+        model: str = "llama-3.3-70b-versatile",
         temperature: float = 0.3,
         max_results: int = 5,
-        log_callback: Callable[[str, str], None] | None = None,
+        log_callback=None,
     ):
         self.groq_key     = groq_key
         self.tavily_key   = tavily_key
@@ -142,9 +126,7 @@ class IntelAgent:
         self.llm   = self._build_llm()
         self.tools = self._build_tools()
 
-    # ── Build LLM ─────────────────────────────────────────────────────────────
-
-    def _build_llm(self) -> ChatGroq:
+    def _build_llm(self):
         return ChatGroq(
             api_key=self.groq_key,
             model_name=self.model,
@@ -152,12 +134,10 @@ class IntelAgent:
             max_tokens=4096,
         )
 
-    # ── Build Tools ───────────────────────────────────────────────────────────
-
-    def _build_tools(self) -> list:
+    def _build_tools(self):
         tools = []
 
-        # Tavily (preferred search)
+        # Tavily (preferred)
         if self.tavily_key and _HAS_TAVILY:
             import os
             os.environ["TAVILY_API_KEY"] = self.tavily_key
@@ -169,7 +149,7 @@ class IntelAgent:
                         "Tavily", q, lambda: str(_t.invoke(q))
                     ),
                     description=(
-                        "Search the live web for current info about companies, products, "
+                        "Search the live web for current info about companies, "
                         "pricing, news, and market data. Input: a search query string."
                     ),
                 ))
@@ -189,28 +169,26 @@ class IntelAgent:
                         "SerpAPI", q, lambda: _s.run(q)
                     ),
                     description=(
-                        "Google search for company information, funding rounds, "
-                        "leadership, product launches. Input: search query string."
+                        "Google search for company info, funding rounds, "
+                        "product launches. Input: search query string."
                     ),
                 ))
                 self.log_callback("SerpAPI search tool loaded", "result")
             except Exception as e:
                 self.log_callback(f"SerpAPI setup failed: {e}", "warn")
 
-        # Demo fallback when no keys provided
+        # Demo fallback
         if not tools:
             tools.append(Tool(
                 name="demo_search",
                 func=self._demo_search,
                 description=(
-                    "Returns demo data. Configure GROQ + TAVILY keys in Settings "
-                    "for live search results. Input: any search query."
+                    "Returns demo data. Add TAVILY_API_KEY in Settings for live results."
                 ),
             ))
             self.log_callback(
-                "No search API keys found — running in DEMO mode. "
-                "Add Tavily/SerpAPI keys in Settings for real data.",
-                "warn"
+                "No search API keys — running in DEMO mode. Add keys in Settings.",
+                "warn",
             )
 
         return tools
@@ -222,42 +200,30 @@ class IntelAgent:
             result  = fn()
             elapsed = time.time() - start
             self.log_callback(
-                f"[{provider}] Got {len(str(result))} chars in {elapsed:.1f}s",
-                "result"
+                f"[{provider}] Got {len(str(result))} chars in {elapsed:.1f}s", "result"
             )
             return str(result)
         except Exception as e:
-            self.log_callback(f"[{provider}] Search error: {e}", "warn")
+            self.log_callback(f"[{provider}] Error: {e}", "warn")
             return f"Search failed: {e}"
 
     @staticmethod
     def _demo_search(query: str) -> str:
         return (
-            f"Demo search results for '{query}': "
-            "Sample data — Company X was founded in 2010, headquartered in San Francisco. "
-            "They offer 3 pricing tiers: Starter $29/mo, Pro $99/mo, Enterprise custom. "
-            "Key strengths: strong brand, large customer base. "
-            "Weaknesses: expensive, complex onboarding. "
-            "Recent news: raised $50M Series C, launched AI features. "
-            "Add real API keys in Settings for live competitive intelligence."
+            f"Demo results for '{query}': Company founded 2010, SF. "
+            "3 pricing tiers: Starter $29/mo, Pro $99/mo, Enterprise custom. "
+            "Strengths: brand, market share. Weaknesses: expensive, complex. "
+            "News: raised $50M Series C, launched AI features. "
+            "Add real API keys in Settings for live data."
         )
 
-    # ── Research a single competitor ──────────────────────────────────────────
-
-    def research_competitor(
-        self,
-        company: str,
-        your_company: str,
-        focus_areas: list,
-    ) -> dict:
+    def research_competitor(self, company: str, your_company: str, focus_areas: list) -> dict:
         focus_str = ", ".join(focus_areas) if focus_areas else "all areas"
         query = (
             f"Research '{company}' as a competitor to '{your_company}'. "
-            f"Focus areas: {focus_str}. "
-            f"Find their pricing, product features, recent news, funding, "
-            f"customer reviews, strengths, weaknesses, and market positioning."
+            f"Focus: {focus_str}. "
+            f"Find pricing, features, recent news, funding, strengths, weaknesses."
         )
-
         self.log_callback(f"Starting research on: {company}", "step")
 
         try:
@@ -270,11 +236,10 @@ class IntelAgent:
                 handle_parsing_errors=True,
                 return_intermediate_steps=False,
             )
-
             result     = executor.invoke({"input": query})
             raw_output = result.get("output", "{}")
+            data       = self._extract_json(raw_output)
 
-            data = self._extract_json(raw_output)
             if not data.get("company_name"):
                 data["company_name"] = company
             data["researched_at"] = datetime.now().isoformat()
@@ -287,53 +252,39 @@ class IntelAgent:
             self.log_callback(f"Error researching {company}: {e}", "error")
             return self._fallback_data(company, your_company, str(e))
 
-    # ── Synthesize cross-competitor report ────────────────────────────────────
-
-    def synthesize_report(
-        self,
-        competitors_data: list,
-        your_company: str,
-        industry: str,
-    ) -> dict:
+    def synthesize_report(self, competitors_data: list, your_company: str, industry: str) -> dict:
         self.log_callback("Synthesizing cross-competitor analysis...", "step")
-
         raw    = json.dumps(competitors_data, indent=2)
         prompt = SYNTHESIS_PROMPT.format(raw_data=raw[:12000])
-
         try:
             response  = self.llm.invoke(prompt)
             text      = response.content if hasattr(response, "content") else str(response)
             synthesis = self._extract_json(text)
-
-            synthesis["your_company"]     = your_company
-            synthesis["industry"]         = industry
-            synthesis["generated_at"]     = datetime.now().isoformat()
-            synthesis["competitor_count"] = len(competitors_data)
-
+            synthesis.update({
+                "your_company":     your_company,
+                "industry":         industry,
+                "generated_at":     datetime.now().isoformat(),
+                "competitor_count": len(competitors_data),
+            })
             self.log_callback("Synthesis complete", "result")
             return synthesis
-
         except Exception as e:
             self.log_callback(f"Synthesis error: {e}", "error")
             return {
-                "error":                   str(e),
-                "generated_at":            datetime.now().isoformat(),
-                "executive_summary":       f"Synthesis failed: {e}",
-                "key_insights":            [],
-                "recommended_actions":     [],
-                "whitespace_opportunities":[],
-                "threats_ranking":         [],
-                "competitive_matrix":      [],
+                "error":                    str(e),
+                "generated_at":             datetime.now().isoformat(),
+                "executive_summary":        f"Synthesis failed: {e}",
+                "key_insights":             [],
+                "recommended_actions":      [],
+                "whitespace_opportunities": [],
+                "threats_ranking":          [],
+                "competitive_matrix":       [],
             }
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(text: str) -> dict:
-        """Extract first valid JSON object from LLM text output."""
         import re
-        text = re.sub(r"```(?:json)?", "", text).strip()
-        text = text.replace("```", "").strip()
+        text = re.sub(r"```(?:json)?", "", text).strip().replace("```", "").strip()
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             try:
@@ -352,7 +303,7 @@ class IntelAgent:
             "company_name":       company,
             "your_company":       your_company,
             "error":              error,
-            "overall_summary":    f"Research encountered an error: {error}",
+            "overall_summary":    f"Research failed: {error}",
             "strengths":          [],
             "weaknesses":         [],
             "opportunities":      [],
