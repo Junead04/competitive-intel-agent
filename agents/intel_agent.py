@@ -11,7 +11,6 @@ import time
 from datetime import datetime
 from typing import Callable
 
-# ── Imports — pinned to langchain 0.2.x ──────────────────────────────────────
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain.agents import AgentExecutor, create_react_agent
@@ -30,95 +29,62 @@ except ImportError:
     _HAS_SERP = False
 
 
-# ── ReAct Prompt ─────────────────────────────────────────────────────────────
+# ── Prompts — kept SHORT to stay under 6000 TPM limit ────────────────────────
 
 AGENT_PROMPT = PromptTemplate.from_template(
-    """You are CompeteIQ, an elite competitive intelligence analyst AI.
-Your task is to deeply research competitors and synthesize actionable market intelligence.
+    """You are a competitive intelligence analyst. Research the competitor and return a JSON report.
 
-## Available Tools
-{tools}
+Tools: {tools}
+Tool names: {tool_names}
 
-## Tool Names
-{tool_names}
+Task: {input}
 
-## Research Objective
-{input}
-
-## Instructions
-1. Use search tools to gather current data about the competitor
-2. Search for: pricing, features, recent news, funding, customer reviews, positioning
-3. Look for weaknesses, opportunities, and strategic threats
-4. Think step-by-step and be thorough
-5. Output ONLY a valid JSON object as your Final Answer
-
-Output your FINAL answer as a valid JSON object with these exact keys:
-- company_name (string)
-- founded (string)
-- headquarters (string)
-- funding (string)
-- employee_count (string)
-- core_products (list of strings)
-- pricing_tiers (list of dicts with keys: name, price, description)
-- strengths (list of strings)
-- weaknesses (list of strings)
-- opportunities (list of strings)
-- threats (list of strings)
-- recent_news (list of dicts with keys: title, date, summary)
-- market_positioning (string)
-- tech_stack (list of strings)
-- target_customers (string)
-- key_differentiators (list of strings)
-- threat_level (integer 1-10)
-- overall_summary (string, 2-3 paragraphs)
-- sources (list of URL strings)
+Instructions:
+- Use web_search 2-3 times maximum
+- Gather: pricing, features, news, strengths, weaknesses
+- Return ONLY valid JSON with these keys:
+  company_name, founded, headquarters, funding, employee_count,
+  core_products (list), pricing_tiers (list of {{name, price, description}}),
+  strengths (list), weaknesses (list), opportunities (list), threats (list),
+  recent_news (list of {{title, date, summary}}), market_positioning,
+  tech_stack (list), target_customers, key_differentiators (list),
+  threat_level (1-10 integer), overall_summary, sources (list)
 
 {agent_scratchpad}"""
 )
 
 
-SYNTHESIS_PROMPT = """You are a senior strategy analyst.
-Given the following raw competitive intelligence data for multiple companies,
-produce a comprehensive comparative analysis report in JSON format with these exact keys:
+SYNTHESIS_PROMPT = """You are a strategy analyst. Analyze these competitors and return JSON.
 
-- executive_summary: 3-4 paragraph strategic overview (string)
-- market_map: dict mapping company name to market segment
-- competitive_matrix: list of dicts, each with keys:
-  company, pricing_score, feature_score, market_score, tech_score, support_score, brand_score
-  (all scores are integers 1-10)
-- key_insights: list of 5-7 actionable strategic insight strings
-- threats_ranking: list of dicts with keys: company, rationale
-  sorted from highest to lowest threat
-- whitespace_opportunities: list of market gap/opportunity strings
-- recommended_actions: list of 5 strategic recommendation strings
-- methodology_note: string describing data sources used
+Competitors: {raw_data}
 
-Raw competitor data:
-{raw_data}
+Return ONLY valid JSON with keys:
+- executive_summary (string)
+- key_insights (list of 5 strings)
+- threats_ranking (list of {{company, rationale}})
+- whitespace_opportunities (list of 3 strings)
+- recommended_actions (list of 5 strings)
+- competitive_matrix (list of {{company, pricing_score, feature_score, market_score, tech_score, support_score, brand_score}})
+- market_map (dict)
+- methodology_note (string)
 
-Return ONLY valid JSON. No markdown, no backticks, no explanation outside the JSON.
+No markdown, no backticks, only JSON.
 """
 
 
-# ── Helper: build a fresh executor ───────────────────────────────────────────
-
 def _build_executor(llm, tools):
-    """Create a new AgentExecutor with the given llm and tools."""
     agent = create_react_agent(llm, tools, AGENT_PROMPT)
     return AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=False,
-        max_iterations=6,
+        max_iterations=3,          # reduced from 6 → fewer tokens per run
         handle_parsing_errors=True,
         return_intermediate_steps=False,
     )
 
 
-# ── Main Agent Class ──────────────────────────────────────────────────────────
-
 class IntelAgent:
-    """LangChain ReAct agent for competitive intelligence research."""
 
     def __init__(
         self,
@@ -127,7 +93,7 @@ class IntelAgent:
         serpapi_key=None,
         model: str = "llama-3.1-8b-instant",
         temperature: float = 0.3,
-        max_results: int = 5,
+        max_results: int = 3,      # reduced from 5 → shorter search results
         log_callback=None,
     ):
         self.groq_key     = groq_key
@@ -141,78 +107,67 @@ class IntelAgent:
         self.llm   = self._build_llm()
         self.tools = self._build_tools()
 
-    # ── Build LLM ─────────────────────────────────────────────────────────────
-
     def _build_llm(self):
         return ChatGroq(
             api_key=self.groq_key,
             model_name=self.model,
             temperature=self.temperature,
-            max_tokens=1500,   # reduced from 4096 to save token quota
+            max_tokens=800,        # reduced from 1500 → stays under 6000 TPM
         )
-
-    # ── Build Tools ───────────────────────────────────────────────────────────
 
     def _build_tools(self):
         tools = []
 
-        # Tavily (preferred)
         if self.tavily_key and _HAS_TAVILY:
             import os
             os.environ["TAVILY_API_KEY"] = self.tavily_key
             try:
                 tavily = TavilySearchResults(max_results=self.max_results)
+
+                def _tavily_search(q, _t=tavily):
+                    raw = str(_t.invoke(q))
+                    # Truncate search result to 1500 chars to avoid 413
+                    return raw[:1500] if len(raw) > 1500 else raw
+
                 tools.append(Tool(
                     name="web_search",
-                    func=lambda q, _t=tavily: self._logged_tool(
-                        "Tavily", q, lambda: str(_t.invoke(q))
-                    ),
-                    description=(
-                        "Search the live web for current info about companies, "
-                        "pricing, news, and market data. Input: a search query string."
-                    ),
+                    func=lambda q: self._logged_tool("Tavily", q, lambda: _tavily_search(q)),
+                    description="Search the web for company info. Input: search query string.",
                 ))
                 self.log_callback("Tavily search tool loaded", "result")
             except Exception as e:
                 self.log_callback(f"Tavily setup failed: {e}", "warn")
 
-        # SerpAPI (fallback)
         if self.serpapi_key and _HAS_SERP:
             import os
             os.environ["SERPAPI_API_KEY"] = self.serpapi_key
             try:
                 serp = SerpAPIWrapper()
+
+                def _serp_search(q, _s=serp):
+                    raw = _s.run(q)
+                    return raw[:1500] if len(raw) > 1500 else raw
+
                 tools.append(Tool(
                     name="google_search",
-                    func=lambda q, _s=serp: self._logged_tool(
-                        "SerpAPI", q, lambda: _s.run(q)
-                    ),
-                    description=(
-                        "Google search for company info, funding rounds, "
-                        "product launches. Input: search query string."
-                    ),
+                    func=lambda q: self._logged_tool("SerpAPI", q, lambda: _serp_search(q)),
+                    description="Google search for company info. Input: search query string.",
                 ))
                 self.log_callback("SerpAPI search tool loaded", "result")
             except Exception as e:
                 self.log_callback(f"SerpAPI setup failed: {e}", "warn")
 
-        # Demo fallback when no keys provided
         if not tools:
             tools.append(Tool(
                 name="demo_search",
                 func=self._demo_search,
-                description=(
-                    "Returns demo data. Add TAVILY_API_KEY in Settings for live results."
-                ),
+                description="Returns demo data. Add API keys in Settings for live results.",
             ))
             self.log_callback(
-                "No search API keys — running in DEMO mode. Add keys in Settings.",
-                "warn",
+                "No search API keys — running in DEMO mode. Add keys in Settings.", "warn"
             )
 
         return tools
-
-    # ── Logged tool wrapper ───────────────────────────────────────────────────
 
     def _logged_tool(self, provider: str, query: str, fn: Callable) -> str:
         self.log_callback(f"[{provider}] Searching: {query}", "tool")
@@ -228,39 +183,44 @@ class IntelAgent:
             self.log_callback(f"[{provider}] Error: {e}", "warn")
             return f"Search failed: {e}"
 
-    # ── Demo search ───────────────────────────────────────────────────────────
-
     @staticmethod
     def _demo_search(query: str) -> str:
         return (
             f"Demo results for '{query}': Company founded 2010, SF. "
-            "3 pricing tiers: Starter $29/mo, Pro $99/mo, Enterprise custom. "
+            "Tiers: Starter $29/mo, Pro $99/mo, Enterprise custom. "
             "Strengths: brand, market share. Weaknesses: expensive, complex. "
-            "News: raised $50M Series C, launched AI features. "
-            "Add real API keys in Settings for live data."
+            "News: raised $50M Series C, launched AI features."
         )
 
-    # ── Research single competitor ────────────────────────────────────────────
-
     def research_competitor(self, company: str, your_company: str, focus_areas: list) -> dict:
-        focus_str = ", ".join(focus_areas) if focus_areas else "all areas"
+        focus_str = ", ".join(focus_areas[:3]) if focus_areas else "pricing, features, news"
         query = (
-            f"Research '{company}' as a competitor to '{your_company}'. "
-            f"Focus: {focus_str}. "
-            f"Find pricing, features, recent news, funding, strengths, weaknesses."
+            f"Research '{company}' competitor to '{your_company}'. "
+            f"Focus: {focus_str}. Find pricing, strengths, weaknesses, recent news."
         )
         self.log_callback(f"Starting research on: {company}", "step")
 
         try:
-            # Build initial executor
             executor = _build_executor(self.llm, self.tools)
 
-            # Run — auto-fallback to 8b model if 429 rate limit hit
             try:
                 result = executor.invoke({"input": query})
 
-            except Exception as rate_err:
-                if "429" in str(rate_err):
+            except Exception as req_err:
+                err_str = str(req_err)
+
+                # 413 — request too large, try gemma2 which handles smaller context better
+                if "413" in err_str:
+                    self.log_callback(
+                        "Request too large — switching to gemma2-9b-it", "warn"
+                    )
+                    self.model = "gemma2-9b-it"
+                    self.llm   = self._build_llm()
+                    executor   = _build_executor(self.llm, self.tools)
+                    result     = executor.invoke({"input": query})
+
+                # 429 — rate limit, switch to 8b
+                elif "429" in err_str:
                     self.log_callback(
                         "Rate limit hit — switching to llama-3.1-8b-instant", "warn"
                     )
@@ -268,8 +228,9 @@ class IntelAgent:
                     self.llm   = self._build_llm()
                     executor   = _build_executor(self.llm, self.tools)
                     result     = executor.invoke({"input": query})
+
                 else:
-                    raise rate_err
+                    raise req_err
 
             raw_output = result.get("output", "{}")
             data       = self._extract_json(raw_output)
@@ -286,28 +247,42 @@ class IntelAgent:
             self.log_callback(f"Error researching {company}: {e}", "error")
             return self._fallback_data(company, your_company, str(e))
 
-    # ── Synthesize cross-competitor report ────────────────────────────────────
-
     def synthesize_report(self, competitors_data: list, your_company: str, industry: str) -> dict:
         self.log_callback("Synthesizing cross-competitor analysis...", "step")
-        raw    = json.dumps(competitors_data, indent=2)
-        prompt = SYNTHESIS_PROMPT.format(raw_data=raw[:12000])
+
+        # Trim competitor data to avoid 413 on synthesis
+        trimmed = []
+        for c in competitors_data:
+            trimmed.append({
+                "company_name":      c.get("company_name", ""),
+                "threat_level":      c.get("threat_level", 5),
+                "strengths":         c.get("strengths", [])[:3],
+                "weaknesses":        c.get("weaknesses", [])[:3],
+                "market_positioning":c.get("market_positioning", ""),
+                "overall_summary":   c.get("overall_summary", "")[:300],
+                "pricing_tiers":     c.get("pricing_tiers", [])[:2],
+            })
+
+        raw    = json.dumps(trimmed, indent=1)
+        prompt = SYNTHESIS_PROMPT.format(raw_data=raw[:3000])  # hard cap at 3000 chars
 
         try:
-            # Auto-fallback on rate limit during synthesis too
             try:
                 response = self.llm.invoke(prompt)
-            except Exception as rate_err:
-                if "429" in str(rate_err):
-                    self.log_callback(
-                        "Rate limit hit during synthesis — switching to llama-3.1-8b-instant",
-                        "warn",
-                    )
+            except Exception as req_err:
+                err_str = str(req_err)
+                if "413" in err_str:
+                    self.log_callback("Request too large in synthesis — switching to gemma2-9b-it", "warn")
+                    self.model = "gemma2-9b-it"
+                    self.llm   = self._build_llm()
+                    response   = self.llm.invoke(prompt)
+                elif "429" in err_str:
+                    self.log_callback("Rate limit in synthesis — switching to llama-3.1-8b-instant", "warn")
                     self.model = "llama-3.1-8b-instant"
                     self.llm   = self._build_llm()
                     response   = self.llm.invoke(prompt)
                 else:
-                    raise rate_err
+                    raise req_err
 
             text      = response.content if hasattr(response, "content") else str(response)
             synthesis = self._extract_json(text)
@@ -332,8 +307,6 @@ class IntelAgent:
                 "threats_ranking":          [],
                 "competitive_matrix":       [],
             }
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(text: str) -> dict:
