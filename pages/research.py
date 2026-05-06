@@ -224,7 +224,7 @@ def _run_agent():
     groq_key   = st.session_state.get("groq_api_key", "")
     tavily_key = st.session_state.get("tavily_api_key", "")
     serpapi_key = st.session_state.get("serpapi_key", "")
-    model       = st.session_state.get("llm_model", "llama3-70b-8192")
+    model       = st.session_state.get("llm_model", "llama-3.1-8b-instant")
     temperature = st.session_state.get("temperature", 0.3)
     max_results = st.session_state.get("max_search_results", 5)
 

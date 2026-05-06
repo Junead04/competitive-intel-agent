@@ -100,6 +100,21 @@ Return ONLY valid JSON. No markdown, no backticks, no explanation outside the JS
 """
 
 
+# ── Helper: build a fresh executor ───────────────────────────────────────────
+
+def _build_executor(llm, tools):
+    """Create a new AgentExecutor with the given llm and tools."""
+    agent = create_react_agent(llm, tools, AGENT_PROMPT)
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=False,
+        max_iterations=6,
+        handle_parsing_errors=True,
+        return_intermediate_steps=False,
+    )
+
+
 # ── Main Agent Class ──────────────────────────────────────────────────────────
 
 class IntelAgent:
@@ -110,7 +125,7 @@ class IntelAgent:
         groq_key: str,
         tavily_key=None,
         serpapi_key=None,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "llama-3.1-8b-instant",
         temperature: float = 0.3,
         max_results: int = 5,
         log_callback=None,
@@ -126,13 +141,17 @@ class IntelAgent:
         self.llm   = self._build_llm()
         self.tools = self._build_tools()
 
+    # ── Build LLM ─────────────────────────────────────────────────────────────
+
     def _build_llm(self):
         return ChatGroq(
             api_key=self.groq_key,
             model_name=self.model,
             temperature=self.temperature,
-            max_tokens=4096,
+            max_tokens=1500,   # reduced from 4096 to save token quota
         )
+
+    # ── Build Tools ───────────────────────────────────────────────────────────
 
     def _build_tools(self):
         tools = []
@@ -177,7 +196,7 @@ class IntelAgent:
             except Exception as e:
                 self.log_callback(f"SerpAPI setup failed: {e}", "warn")
 
-        # Demo fallback
+        # Demo fallback when no keys provided
         if not tools:
             tools.append(Tool(
                 name="demo_search",
@@ -193,6 +212,8 @@ class IntelAgent:
 
         return tools
 
+    # ── Logged tool wrapper ───────────────────────────────────────────────────
+
     def _logged_tool(self, provider: str, query: str, fn: Callable) -> str:
         self.log_callback(f"[{provider}] Searching: {query}", "tool")
         start = time.time()
@@ -207,6 +228,8 @@ class IntelAgent:
             self.log_callback(f"[{provider}] Error: {e}", "warn")
             return f"Search failed: {e}"
 
+    # ── Demo search ───────────────────────────────────────────────────────────
+
     @staticmethod
     def _demo_search(query: str) -> str:
         return (
@@ -216,6 +239,8 @@ class IntelAgent:
             "News: raised $50M Series C, launched AI features. "
             "Add real API keys in Settings for live data."
         )
+
+    # ── Research single competitor ────────────────────────────────────────────
 
     def research_competitor(self, company: str, your_company: str, focus_areas: list) -> dict:
         focus_str = ", ".join(focus_areas) if focus_areas else "all areas"
@@ -227,16 +252,25 @@ class IntelAgent:
         self.log_callback(f"Starting research on: {company}", "step")
 
         try:
-            agent    = create_react_agent(self.llm, self.tools, AGENT_PROMPT)
-            executor = AgentExecutor(
-                agent=agent,
-                tools=self.tools,
-                verbose=False,
-                max_iterations=8,
-                handle_parsing_errors=True,
-                return_intermediate_steps=False,
-            )
-            result     = executor.invoke({"input": query})
+            # Build initial executor
+            executor = _build_executor(self.llm, self.tools)
+
+            # Run — auto-fallback to 8b model if 429 rate limit hit
+            try:
+                result = executor.invoke({"input": query})
+
+            except Exception as rate_err:
+                if "429" in str(rate_err):
+                    self.log_callback(
+                        "Rate limit hit — switching to llama-3.1-8b-instant", "warn"
+                    )
+                    self.model = "llama-3.1-8b-instant"
+                    self.llm   = self._build_llm()
+                    executor   = _build_executor(self.llm, self.tools)
+                    result     = executor.invoke({"input": query})
+                else:
+                    raise rate_err
+
             raw_output = result.get("output", "{}")
             data       = self._extract_json(raw_output)
 
@@ -252,12 +286,29 @@ class IntelAgent:
             self.log_callback(f"Error researching {company}: {e}", "error")
             return self._fallback_data(company, your_company, str(e))
 
+    # ── Synthesize cross-competitor report ────────────────────────────────────
+
     def synthesize_report(self, competitors_data: list, your_company: str, industry: str) -> dict:
         self.log_callback("Synthesizing cross-competitor analysis...", "step")
         raw    = json.dumps(competitors_data, indent=2)
         prompt = SYNTHESIS_PROMPT.format(raw_data=raw[:12000])
+
         try:
-            response  = self.llm.invoke(prompt)
+            # Auto-fallback on rate limit during synthesis too
+            try:
+                response = self.llm.invoke(prompt)
+            except Exception as rate_err:
+                if "429" in str(rate_err):
+                    self.log_callback(
+                        "Rate limit hit during synthesis — switching to llama-3.1-8b-instant",
+                        "warn",
+                    )
+                    self.model = "llama-3.1-8b-instant"
+                    self.llm   = self._build_llm()
+                    response   = self.llm.invoke(prompt)
+                else:
+                    raise rate_err
+
             text      = response.content if hasattr(response, "content") else str(response)
             synthesis = self._extract_json(text)
             synthesis.update({
@@ -268,6 +319,7 @@ class IntelAgent:
             })
             self.log_callback("Synthesis complete", "result")
             return synthesis
+
         except Exception as e:
             self.log_callback(f"Synthesis error: {e}", "error")
             return {
@@ -280,6 +332,8 @@ class IntelAgent:
                 "threats_ranking":          [],
                 "competitive_matrix":       [],
             }
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(text: str) -> dict:

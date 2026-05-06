@@ -25,7 +25,7 @@ def init_session_state():
         "tracked_competitors": [],
 
         # Settings
-        "llm_model": "llama-3.3-70b-versatile",
+        "llm_model": "llama-3.1-8b-instant",
         "max_search_results": 5,
         "report_depth": "comprehensive",
         "auto_save_reports": True,

@@ -48,8 +48,8 @@ def _api_keys_tab():
                    Get free key ↗</a>
             </div>
             <div style="color:var(--text-secondary);font-size:0.8rem;margin-bottom:0.5rem;">
-                Powers the LLM analysis and synthesis. Free tier: 14,400 req/day.
-                Recommended model: <code>llama3-70b-8192</code>
+                Powers the LLM analysis and synthesis. Free tier: 500K tokens/day on 8B model.
+                Recommended model: <code>llama-3.1-8b-instant</code>
             </div>
         </div>""",
         unsafe_allow_html=True,
@@ -142,7 +142,8 @@ def _test_groq(key: str):
     with st.spinner("Testing connection..."):
         try:
             from langchain_groq import ChatGroq
-            llm = ChatGroq(api_key=key, model_name="llama3-8b-8192", max_tokens=20)
+            # ✅ CHANGED: llama3-8b-8192 → llama-3.1-8b-instant (old model decommissioned)
+            llm = ChatGroq(api_key=key, model_name="llama-3.1-8b-instant", max_tokens=20)
             llm.invoke("Say 'OK' and nothing else.")
             st.success("✅ Groq connection successful!")
         except Exception as e:
@@ -154,22 +155,23 @@ def _test_groq(key: str):
 def _model_tab():
     st.markdown('<div class="section-title">🤖 LLM Configuration</div>', unsafe_allow_html=True)
 
+    # ✅ CHANGED: llama-3.1-8b-instant moved to top (saves most tokens, 500K/day limit)
     models = [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "llama-3.1-70b-versatile",
-    "gemma2-9b-it",
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "gemma2-9b-it",
     ]
 
-    # ✅ NEW
     model_desc = {
-        "llama-3.3-70b-versatile": "Best quality — Llama 3.3 70B. Official replacement for llama3-70b. Recommended.",
-        "llama-3.1-8b-instant":    "Fastest & cheapest — 8B model. Good for quick research or testing.",
-        "llama-3.1-70b-versatile": "Alternative 70B — slightly older than 3.3 but still very capable.",
-        "gemma2-9b-it":            "Google Gemma 2 — lightweight, instruction-tuned, good for simple tasks.",
+        "llama-3.1-8b-instant":    "✅ RECOMMENDED — Fastest & 5x more token quota (500K/day). Best for free tier.",
+        "llama-3.3-70b-versatile": "⚠️ Best quality but hits 100K/day limit fast. Use sparingly.",
+        "llama-3.1-70b-versatile": "⚠️ Alternative 70B — same quota limits as 3.3. Use sparingly.",
+        "gemma2-9b-it":            "Google Gemma 2 — lightweight, good alternative to 8B instant.",
     }
 
-    current_model = st.session_state.get("llm_model", "llama-3.3-70b-versatile")
+    # ✅ CHANGED: default → llama-3.1-8b-instant
+    current_model = st.session_state.get("llm_model", "llama-3.1-8b-instant")
     model = st.selectbox(
         "Groq Model",
         models,
@@ -178,6 +180,21 @@ def _model_tab():
 
     st.markdown(
         f'<div class="insight-block">{model_desc.get(model, "")}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Token quota info box
+    quota_info = {
+        "llama-3.1-8b-instant":    ("500,000", "green"),
+        "llama-3.3-70b-versatile": ("100,000", "amber"),
+        "llama-3.1-70b-versatile": ("100,000", "amber"),
+        "gemma2-9b-it":            ("500,000", "green"),
+    }
+    quota, color = quota_info.get(model, ("100,000", "amber"))
+    st.markdown(
+        f'<div class="insight-block {color if color != "green" else "success"}">'
+        f'📊 Free tier daily token limit for this model: <strong>{quota} tokens/day</strong>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -236,7 +253,7 @@ def _research_tab():
     )
 
     if st.button("💾  Save Research Settings"):
-        st.session_state.report_depth      = depth
+        st.session_state.report_depth       = depth
         st.session_state.max_search_results = max_results
         st.session_state.auto_save_reports  = auto_save
         st.session_state.search_provider    = provider
@@ -287,6 +304,10 @@ def _display_tab():
                 <div style="color:var(--text-primary);">{streamlit.__version__}</div>
                 <div style="color:var(--text-secondary);">Python</div>
                 <div style="color:var(--text-primary);">{sys.version[:10]}</div>
+                <div style="color:var(--text-secondary);">Default Model</div>
+                <div style="color:var(--text-primary);">llama-3.1-8b-instant</div>
+                <div style="color:var(--text-secondary);">Token Quota</div>
+                <div style="color:var(--accent-green);">500K / day (free)</div>
             </div>
         </div>""",
         unsafe_allow_html=True,
